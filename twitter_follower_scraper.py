@@ -2,6 +2,11 @@ import sys
 import subprocess
 import datetime
 import pandas as pd
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 def install_requirements():
     """Install required packages if they're missing."""
@@ -9,7 +14,8 @@ def install_requirements():
         'selenium',
         'requests',
         'webdriver-manager',
-        'pandas'
+        'pandas',
+        'python-dotenv'
     ]
     
     for package in required_packages:
@@ -39,9 +45,9 @@ import json
 import re
 
 # Airtable configuration
-AIRTABLE_PAT = "patC3CJ296jcbbAMd.e12065cdff24c5b8e6ed1e9315fa4f5a9233ee9803efd602a7a2a74ff14c5057"
-AIRTABLE_BASE_ID = "appdeZcAttBaG5oVI"
-AIRTABLE_TABLE_NAME = "Politicians"
+AIRTABLE_PAT = os.getenv('AIRTABLE_PAT')
+AIRTABLE_BASE_ID = os.getenv('AIRTABLE_BASE_ID')
+AIRTABLE_TABLE_NAME = os.getenv('AIRTABLE_TABLE_NAME')
 
 def wait_random():
     time.sleep(random.uniform(0.2, 0.5))  # Quick wait
