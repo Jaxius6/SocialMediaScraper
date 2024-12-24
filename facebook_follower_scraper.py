@@ -3,10 +3,60 @@ import subprocess
 import datetime
 import pandas as pd
 import os
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime
 from dotenv import load_dotenv
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Configure logging
+def setup_logging():
+    """Set up logging to both file and console with proper formatting"""
+    log_filename = f'logs/facebook_scraper_{datetime.now().strftime("%Y%m%d")}.log'
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Setup file handler
+    file_handler = RotatingFileHandler(
+        log_filename,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Setup logger
+    logger = logging.getLogger('facebook_scraper')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_logging()
 
 # Load environment variables
 load_dotenv()
+
+def check_environment():
+    """Check if all required environment variables are set"""
+    required_vars = ['AIRTABLE_PAT', 'AIRTABLE_BASE_ID', 'AIRTABLE_TABLE_NAME']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+    return True
 
 def install_requirements():
     """Install required packages if they're missing."""
@@ -22,13 +72,21 @@ def install_requirements():
         try:
             __import__(package.replace('-', '_'))
         except ImportError:
-            print(f"Installing {package}...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
-            print(f"Successfully installed {package}")
+            logger.info(f"Installing {package}...")
+            try:
+                subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
+                logger.info(f"Successfully installed {package}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to install {package}: {str(e)}")
+                return False
+    return True
 
 # Install requirements if needed
 if __name__ == '__main__':
-    install_requirements()
+    if not check_environment():
+        sys.exit(1)
+    if not install_requirements():
+        sys.exit(1)
 
 # Now import all required packages
 from selenium import webdriver
@@ -77,7 +135,7 @@ def parse_follower_count(text):
             number_str = number_str.replace(',', '')
             return float(number_str) * multiplier
     except Exception as e:
-        print(f"Error parsing follower count '{text}': {str(e)}")
+        logger.error(f"Error parsing follower count '{text}': {str(e)}")
     return None
 
 def get_follower_counts(usernames, max_retries=2):
@@ -101,17 +159,17 @@ def get_follower_counts(usernames, max_retries=2):
     total_users = len(usernames)
     
     try:
-        print("Initializing Chrome driver...")
+        logger.info("Initializing Chrome driver...")
         try:
             service = Service()
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
-            print(f"Error with default service, trying ChromeDriverManager: {str(e)}")
+            logger.error(f"Error with default service, trying ChromeDriverManager: {str(e)}")
             try:
                 service = Service(ChromeDriverManager().install())
                 driver = webdriver.Chrome(service=service, options=options)
             except Exception as e:
-                print(f"Error with ChromeDriverManager: {str(e)}")
+                logger.error(f"Error with ChromeDriverManager: {str(e)}")
                 service = Service("chromedriver.exe")
                 driver = webdriver.Chrome(service=service, options=options)
 
@@ -125,7 +183,7 @@ def get_follower_counts(usernames, max_retries=2):
             
             while retries < max_retries and follower_count is None:
                 try:
-                    print(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
+                    logger.info(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
                     url = f"https://www.facebook.com/{username}"
                     driver.get(url)
                     wait_random()
@@ -135,10 +193,10 @@ def get_follower_counts(usernames, max_retries=2):
                         wait = WebDriverWait(driver, 5)
                         close_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'div[aria-label="Close"]')))
                         close_button.click()
-                        print("Closed login popup")
+                        logger.info("Closed login popup")
                         wait_random()
                     except:
-                        print("No login popup found or couldn't close it")
+                        logger.info("No login popup found or couldn't close it")
                     
                     # Try to find follower count using multiple possible selectors
                     wait = WebDriverWait(driver, 10)
@@ -155,7 +213,7 @@ def get_follower_counts(usernames, max_retries=2):
                         try:
                             element = driver.find_element(By.CSS_SELECTOR, selector)
                             follower_text = element.text
-                            print(f"Found text: {follower_text}")
+                            logger.info(f"Found text: {follower_text}")
                             follower_count = parse_follower_count(follower_text)
                             if follower_count is not None:
                                 break
@@ -166,22 +224,22 @@ def get_follower_counts(usernames, max_retries=2):
                         error_message = "Could not find or parse follower count"
                         retries += 1
                         if retries < max_retries:
-                            print(f"Retrying... ({retries}/{max_retries})")
+                            logger.info(f"Retrying... ({retries}/{max_retries})")
                             wait_random()
                         
                 except TimeoutException as e:
                     error_message = f"Timeout: {str(e)}"
-                    print(f"Timeout while processing {username}")
+                    logger.error(f"Timeout while processing {username}")
                     retries += 1
                     if retries < max_retries:
-                        print(f"Retrying... ({retries}/{max_retries})")
+                        logger.info(f"Retrying... ({retries}/{max_retries})")
                         wait_random()
                 except Exception as e:
                     error_message = str(e)
-                    print(f"Error processing {username}: {str(e)}")
+                    logger.error(f"Error processing {username}: {str(e)}")
                     retries += 1
                     if retries < max_retries:
-                        print(f"Retrying... ({retries}/{max_retries})")
+                        logger.info(f"Retrying... ({retries}/{max_retries})")
                         wait_random()
             
             # Add result whether successful or not
@@ -193,14 +251,14 @@ def get_follower_counts(usernames, max_retries=2):
             })
             
             if follower_count is not None:
-                print(f"Successfully retrieved follower count for {username}: {follower_count:,.0f}")
+                logger.info(f"Successfully retrieved follower count for {username}: {follower_count:,.0f}")
             else:
-                print(f"Failed to process {username} after {max_retries} attempts: {error_message}")
+                logger.error(f"Failed to process {username} after {max_retries} attempts: {error_message}")
             
             wait_random()
             
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
     finally:
         if driver:
             driver.quit()
@@ -224,7 +282,7 @@ def get_airtable_records():
             'facebook_user': record.get('fields', {}).get('facebook_user', ''),
         } for record in records if record.get('fields', {}).get('facebook_user')]
     else:
-        print(f"Error fetching Airtable records: {response.status_code}")
+        logger.error(f"Error fetching Airtable records: {response.status_code}")
         return []
 
 def update_airtable_batch(updates):
@@ -259,30 +317,30 @@ def update_airtable_batch(updates):
         response = requests.patch(url, headers=headers, json=payload)
         
         if response.status_code == 200:
-            print(f"Successfully updated batch of {len(batch)} records in Airtable")
+            logger.info(f"Successfully updated batch of {len(batch)} records in Airtable")
         else:
-            print(f"Error updating Airtable records: {response.status_code}")
-            print(response.text)
+            logger.error(f"Error updating Airtable records: {response.status_code}")
+            logger.error(response.text)
             success = False
             
     return success
 
 if __name__ == "__main__":
-    print("Fetching Facebook usernames from Airtable...")
+    logger.info("Fetching Facebook usernames from Airtable...")
     airtable_records = get_airtable_records()
     
     if not airtable_records:
-        print("No Facebook usernames found in Airtable")
+        logger.error("No Facebook usernames found in Airtable")
         sys.exit(1)
         
-    print(f"Found {len(airtable_records)} Facebook usernames")
+    logger.info(f"Found {len(airtable_records)} Facebook usernames")
     
     # Get follower counts
     usernames = [record['facebook_user'] for record in airtable_records]
     results = get_follower_counts(usernames)
     
     if not results:
-        print("No follower data retrieved")
+        logger.error("No follower data retrieved")
         sys.exit(1)
         
     # Prepare updates for Airtable
@@ -302,7 +360,7 @@ if __name__ == "__main__":
     
     # Update Airtable in batches
     if updates:
-        print(f"Updating {len(updates)} records in Airtable...")
+        logger.info(f"Updating {len(updates)} records in Airtable...")
         if update_airtable_batch(updates):
             success_count = len(updates)
     
@@ -317,22 +375,22 @@ if __name__ == "__main__":
             failed_results.append(result)
     
     # Print results in a nice format
-    print("\nFinal Results:")
-    print("-" * 50)
+    logger.info("\nFinal Results:")
+    logger.info("-" * 50)
     
     if successful_results:
-        print("\nSuccessful Updates:")
+        logger.info("\nSuccessful Updates:")
         for result in successful_results:
             count = result['follower_count']
-            print(f"{result['username']}: {count:,.0f} followers")
+            logger.info(f"{result['username']}: {count:,.0f} followers")
     
     if failed_results:
-        print("\nFailed Updates:")
+        logger.info("\nFailed Updates:")
         for result in failed_results:
-            print(f"{result['username']}: Not found")
+            logger.error(f"{result['username']}: Not found")
     
     if results:
-        print(f"\nTimestamp: {results[0]['timestamp']}")
-        print(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
+        logger.info(f"\nTimestamp: {results[0]['timestamp']}")
+        logger.info(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
     if failed_results:
-        print(f"Failed to get follower counts for {len(failed_results)} accounts")
+        logger.error(f"Failed to get follower counts for {len(failed_results)} accounts")
