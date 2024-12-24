@@ -417,6 +417,6 @@ if __name__ == "__main__":
     
     if results:
         logger.info(f"\nTimestamp: {results[0]['timestamp']}")
-        logger.info(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
+        logger.info(f"Successfully updated {success_count} out of {len(results)} YouTube records in Airtable")
     if failed_results:
-        logger.error(f"Failed to get subscriber counts for {len(failed_results)} channels")
+        logger.error(f"Failed to get subscriber counts for {len(failed_results)} YouTube channels")
