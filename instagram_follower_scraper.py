@@ -1,12 +1,84 @@
 import sys
 import subprocess
-import datetime
+from datetime import datetime
 import pandas as pd
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
+import time
+from functools import wraps
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Configure logging
+def setup_logging():
+    """Set up logging to both file and console with proper formatting"""
+    log_filename = f'logs/instagram_scraper_{datetime.now().strftime("%Y%m%d")}.log'
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Setup file handler
+    file_handler = RotatingFileHandler(
+        log_filename,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Setup logger
+    logger = logging.getLogger('instagram_scraper')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_logging()
 
 # Load environment variables
 load_dotenv()
+
+def retry_with_backoff(retries=3, backoff_in_seconds=1):
+    """Retry decorator with exponential backoff"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        logger.error(f"Failed after {retries} attempts: {str(e)}")
+                        raise
+                    wait = (backoff_in_seconds * 2 ** x)
+                    logger.info(f"Attempt {x + 1} failed: {str(e)}")
+                    logger.info(f"Retrying in {wait} seconds...")
+                    time.sleep(wait)
+                    x += 1
+        return wrapper
+    return decorator
+
+def check_environment():
+    """Check if all required environment variables are set"""
+    required_vars = ['AIRTABLE_PAT', 'AIRTABLE_BASE_ID', 'AIRTABLE_TABLE_NAME']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+    return True
 
 def install_requirements():
     """Install required packages if they're missing."""
@@ -22,9 +94,9 @@ def install_requirements():
         try:
             __import__(package.replace('-', '_'))
         except ImportError:
-            print(f"Installing {package}...")
+            logger.info(f"Installing {package}...")
             subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
-            print(f"Successfully installed {package}")
+            logger.info(f"Successfully installed {package}")
 
 # Install requirements if needed
 if __name__ == '__main__':
@@ -77,9 +149,10 @@ def parse_follower_count(text):
             number_str = number_str.replace(',', '')
             return float(number_str) * multiplier
     except Exception as e:
-        print(f"Error parsing follower count '{text}': {str(e)}")
+        logger.error(f"Error parsing follower count '{text}': {str(e)}")
     return None
 
+@retry_with_backoff(retries=3, backoff_in_seconds=1)
 def get_follower_counts(usernames, max_retries=2):
     # Setup Chrome options
     options = webdriver.ChromeOptions()
@@ -96,22 +169,22 @@ def get_follower_counts(usernames, max_retries=2):
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
     
     results = []
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     driver = None
     total_users = len(usernames)
     
     try:
-        print("Initializing Chrome driver...")
+        logger.info("Initializing Chrome driver...")
         try:
             service = Service()
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
-            print(f"Error with default service, trying ChromeDriverManager: {str(e)}")
+            logger.error(f"Error with default service, trying ChromeDriverManager: {str(e)}")
             try:
                 service = Service(ChromeDriverManager().install())
                 driver = webdriver.Chrome(service=service, options=options)
             except Exception as e:
-                print(f"Error with ChromeDriverManager: {str(e)}")
+                logger.error(f"Error with ChromeDriverManager: {str(e)}")
                 service = Service("chromedriver.exe")
                 driver = webdriver.Chrome(service=service, options=options)
 
@@ -125,7 +198,7 @@ def get_follower_counts(usernames, max_retries=2):
             
             while retries < max_retries and follower_count is None:
                 try:
-                    print(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
+                    logger.info(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
                     url = f"https://www.instagram.com/{username}/"
                     driver.get(url)
                     
@@ -178,13 +251,13 @@ def get_follower_counts(usernames, max_retries=2):
                             raise ValueError("Could not find follower count")
                             
                         except Exception as e:
-                            print(f"Error getting follower count: {str(e)}")
+                            logger.error(f"Error getting follower count: {str(e)}")
                             return None
                     
                     follower_count = get_follower_count(driver, username)
                     
                     if follower_count is not None:
-                        print(f"Successfully found follower count: {follower_count}")
+                        logger.info(f"Successfully found follower count: {follower_count}")
                         break
                         
                     # If we haven't found the count yet, wait and try again
@@ -196,17 +269,17 @@ def get_follower_counts(usernames, max_retries=2):
                     
                 except TimeoutException as e:
                     error_message = f"Timeout: {str(e)}"
-                    print(f"Timeout while processing {username}")
+                    logger.error(f"Timeout while processing {username}")
                     retries += 1
                     if retries < max_retries:
-                        print(f"Retrying... ({retries}/{max_retries})")
+                        logger.info(f"Retrying... ({retries}/{max_retries})")
                         wait_random()
                 except Exception as e:
                     error_message = str(e)
-                    print(f"Error processing {username}: {str(e)}")
+                    logger.error(f"Error processing {username}: {str(e)}")
                     retries += 1
                     if retries < max_retries:
-                        print(f"Retrying... ({retries}/{max_retries})")
+                        logger.info(f"Retrying... ({retries}/{max_retries})")
                         wait_random()
             
             # Add result whether successful or not
@@ -218,14 +291,14 @@ def get_follower_counts(usernames, max_retries=2):
             })
             
             if follower_count is not None:
-                print(f"Successfully retrieved follower count for {username}: {follower_count:,.0f}")
+                logger.info(f"Successfully retrieved follower count for {username}: {follower_count:,.0f}")
             else:
-                print(f"Failed to process {username} after {max_retries} attempts: {error_message}")
+                logger.error(f"Failed to process {username} after {max_retries} attempts: {error_message}")
             
             wait_random()
             
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
     finally:
         if driver:
             driver.quit()
@@ -249,7 +322,7 @@ def get_airtable_records():
             'ig_user': record.get('fields', {}).get('ig_user', ''),
         } for record in records if record.get('fields', {}).get('ig_user')]
     else:
-        print(f"Error fetching Airtable records: {response.status_code}")
+        logger.error(f"Error fetching Airtable records: {response.status_code}")
         return []
 
 def update_airtable_batch(updates):
@@ -284,30 +357,33 @@ def update_airtable_batch(updates):
         response = requests.patch(url, headers=headers, json=payload)
         
         if response.status_code == 200:
-            print(f"Successfully updated batch of {len(batch)} records in Airtable")
+            logger.info(f"Successfully updated batch of {len(batch)} records in Airtable")
         else:
-            print(f"Error updating Airtable records: {response.status_code}")
-            print(response.text)
+            logger.error(f"Error updating Airtable records: {response.status_code}")
+            logger.error(response.text)
             success = False
             
     return success
 
 if __name__ == "__main__":
-    print("Fetching Instagram usernames from Airtable...")
+    if not check_environment():
+        sys.exit(1)
+        
+    logger.info("Fetching Instagram usernames from Airtable...")
     airtable_records = get_airtable_records()
     
     if not airtable_records:
-        print("No Instagram usernames found in Airtable")
+        logger.error("No Instagram usernames found in Airtable")
         sys.exit(1)
         
-    print(f"Found {len(airtable_records)} Instagram usernames")
+    logger.info(f"Found {len(airtable_records)} Instagram usernames")
     
     # Get follower counts
     usernames = [record['ig_user'] for record in airtable_records]
     results = get_follower_counts(usernames)
     
     if not results:
-        print("No follower data retrieved")
+        logger.error("No follower data retrieved")
         sys.exit(1)
         
     # Prepare updates for Airtable
@@ -327,7 +403,7 @@ if __name__ == "__main__":
     
     # Update Airtable in batches
     if updates:
-        print(f"Updating {len(updates)} records in Airtable...")
+        logger.info(f"Updating {len(updates)} records in Airtable...")
         if update_airtable_batch(updates):
             success_count = len(updates)
     
@@ -342,22 +418,22 @@ if __name__ == "__main__":
             failed_results.append(result)
     
     # Print results in a nice format
-    print("\nFinal Results:")
-    print("-" * 50)
+    logger.info("\nFinal Results:")
+    logger.info("-" * 50)
     
     if successful_results:
-        print("\nSuccessful Updates:")
+        logger.info("\nSuccessful Updates:")
         for result in successful_results:
             count = result['follower_count']
-            print(f"{result['username']}: {count:,.0f} followers")
+            logger.info(f"{result['username']}: {count:,.0f} followers")
     
     if failed_results:
-        print("\nFailed Updates:")
+        logger.info("\nFailed Updates:")
         for result in failed_results:
-            print(f"{result['username']}: Not found")
+            logger.error(f"{result['username']}: Not found")
     
     if results:
-        print(f"\nTimestamp: {results[0]['timestamp']}")
-        print(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
+        logger.info(f"\nTimestamp: {results[0]['timestamp']}")
+        logger.info(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
     if failed_results:
-        print(f"Failed to get follower counts for {len(failed_results)} accounts")
+        logger.error(f"Failed to get follower counts for {len(failed_results)} accounts")

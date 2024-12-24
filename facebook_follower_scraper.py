@@ -1,12 +1,13 @@
 import sys
 import subprocess
-import datetime
+from datetime import datetime
 import pandas as pd
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 from dotenv import load_dotenv
+import time
+from functools import wraps
 
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
@@ -154,7 +155,7 @@ def get_follower_counts(usernames, max_retries=2):
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
     
     results = []
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     driver = None
     total_users = len(usernames)
     
@@ -265,51 +266,74 @@ def get_follower_counts(usernames, max_retries=2):
             
     return results
 
+def retry_with_backoff(retries=3, backoff_in_seconds=1):
+    """Retry decorator with exponential backoff"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        logger.error(f"Failed after {retries} attempts: {str(e)}")
+                        raise
+                    wait = (backoff_in_seconds * 2 ** x)
+                    logger.info(f"Attempt {x + 1} failed: {str(e)}")
+                    logger.info(f"Retrying in {wait} seconds...")
+                    time.sleep(wait)
+                    x += 1
+        return wrapper
+    return decorator
+
+@retry_with_backoff(retries=3, backoff_in_seconds=1)
 def get_airtable_records():
-    """Fetch records from Airtable."""
+    """Fetch records from Airtable with retry logic."""
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
     headers = {
         'Authorization': f'Bearer {AIRTABLE_PAT}',
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
     }
     
-    url = f'https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}'
     response = requests.get(url, headers=headers)
-    
     if response.status_code == 200:
         records = response.json().get('records', [])
         return [{
-            'id': record['id'],
+            'id': record.get('id'),
             'facebook_user': record.get('fields', {}).get('facebook_user', ''),
         } for record in records if record.get('fields', {}).get('facebook_user')]
     else:
         logger.error(f"Error fetching Airtable records: {response.status_code}")
-        return []
+        logger.error(f"Response: {response.text}")
+        raise Exception(f"Airtable API error: {response.status_code}")
 
+@retry_with_backoff(retries=3, backoff_in_seconds=1)
 def update_airtable_batch(updates):
     """Update multiple records in Airtable in a single request."""
     if not updates:
         return True
-        
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
     headers = {
         'Authorization': f'Bearer {AIRTABLE_PAT}',
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
     }
-    
-    url = f'https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}'
-    
-    # Process updates in batches of 10
+
+    # Process in batches of 10 (Airtable limit)
     batch_size = 10
     success = True
-    
+
     for i in range(0, len(updates), batch_size):
         batch = updates[i:i + batch_size]
         
-        # Prepare the records for batch update
+        # Prepare the payload
         payload = {
             'records': [{
                 'id': update['id'],
                 'fields': {
-                    'facebook_followers': update['follower_count']
+                    'facebook_followers': update['follower_count'],
+                    'facebook_last_updated': update['timestamp']
                 }
             } for update in batch]
         }
@@ -320,8 +344,8 @@ def update_airtable_batch(updates):
             logger.info(f"Successfully updated batch of {len(batch)} records in Airtable")
         else:
             logger.error(f"Error updating Airtable records: {response.status_code}")
-            logger.error(response.text)
-            success = False
+            logger.error(f"Response: {response.text}")
+            raise Exception(f"Airtable API error: {response.status_code}")
             
     return success
 

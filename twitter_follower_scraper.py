@@ -1,12 +1,84 @@
 import sys
 import subprocess
-import datetime
+from datetime import datetime
 import pandas as pd
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
+import time
+from functools import wraps
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Configure logging
+def setup_logging():
+    """Set up logging to both file and console with proper formatting"""
+    log_filename = f'logs/twitter_scraper_{datetime.now().strftime("%Y%m%d")}.log'
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Setup file handler
+    file_handler = RotatingFileHandler(
+        log_filename,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Setup logger
+    logger = logging.getLogger('twitter_scraper')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_logging()
 
 # Load environment variables
 load_dotenv()
+
+def retry_with_backoff(retries=3, backoff_in_seconds=1):
+    """Retry decorator with exponential backoff"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        logger.error(f"Failed after {retries} attempts: {str(e)}")
+                        raise
+                    wait = (backoff_in_seconds * 2 ** x)
+                    logger.info(f"Attempt {x + 1} failed: {str(e)}")
+                    logger.info(f"Retrying in {wait} seconds...")
+                    time.sleep(wait)
+                    x += 1
+        return wrapper
+    return decorator
+
+def check_environment():
+    """Check if all required environment variables are set"""
+    required_vars = ['AIRTABLE_PAT', 'AIRTABLE_BASE_ID', 'AIRTABLE_TABLE_NAME']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+    return True
 
 def install_requirements():
     """Install required packages if they're missing."""
@@ -22,9 +94,9 @@ def install_requirements():
         try:
             __import__(package.replace('-', '_'))
         except ImportError:
-            print(f"Installing {package}...")
+            logger.info(f"Installing {package}...")
             subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
-            print(f"Successfully installed {package}")
+            logger.info(f"Successfully installed {package}")
 
 # Install requirements if needed
 if __name__ == '__main__':
@@ -77,9 +149,10 @@ def parse_follower_count(text):
             number_str = number_str.replace(',', '')
             return float(number_str) * multiplier
     except Exception as e:
-        print(f"Error parsing follower count '{text}': {str(e)}")
+        logger.error(f"Error parsing follower count '{text}': {str(e)}")
     return None
 
+@retry_with_backoff(retries=3, backoff_in_seconds=1)
 def get_follower_counts(usernames, max_retries=3):
     # Setup Chrome options
     options = webdriver.ChromeOptions()
@@ -90,22 +163,22 @@ def get_follower_counts(usernames, max_retries=3):
     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     
     results = []
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     driver = None
     
     try:
-        print("Initializing Chrome driver...")
+        logger.info("Initializing Chrome driver...")
         # Use a more reliable way to initialize Chrome
         try:
             service = Service()
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
-            print(f"Error with default service, trying ChromeDriverManager: {str(e)}")
+            logger.error(f"Error with default service, trying ChromeDriverManager: {str(e)}")
             try:
                 service = Service(ChromeDriverManager().install())
                 driver = webdriver.Chrome(service=service, options=options)
             except Exception as e:
-                print(f"Error with ChromeDriverManager: {str(e)}")
+                logger.error(f"Error with ChromeDriverManager: {str(e)}")
                 # Try one more time with default Chrome location
                 service = Service("chromedriver.exe")
                 driver = webdriver.Chrome(service=service, options=options)
@@ -118,7 +191,7 @@ def get_follower_counts(usernames, max_retries=3):
             
             while retries < max_retries:
                 try:
-                    print(f"\nProcessing @{username} (attempt {retries + 1})...")
+                    logger.info(f"\nProcessing @{username} (attempt {retries + 1})...")
                     url = f'https://twitter.com/{username}'
                     
                     try:
@@ -213,14 +286,14 @@ def get_follower_counts(usernames, max_retries=3):
                                 if page_info:
                                     elements = json.loads(page_info)
                                     if elements:
-                                        print(f"\nFound {len(elements)} potential elements:")
+                                        logger.info(f"\nFound {len(elements)} potential elements:")
                                         for element in elements:
-                                            print("Element:", element)
+                                            logger.info("Element:", element)
                                             if 'text' in element:
                                                 count = parse_follower_count(element['text'])
                                                 if count is not None:
                                                     follower_count = count
-                                                    print(f"\nExtracted follower count: {count:,.0f}")
+                                                    logger.info(f"\nExtracted follower count: {count:,.0f}")
                                                     raise StopIteration  # Break out of all loops
                                 
                                 time.sleep(0.5)  # Short wait between quick attempts
@@ -230,7 +303,7 @@ def get_follower_counts(usernames, max_retries=3):
                             except Exception as e:
                                 if "Redirect detected" in str(e):
                                     raise  # Re-raise redirect exception
-                                print(f"Quick attempt error: {str(e)}")
+                                logger.error(f"Quick attempt error: {str(e)}")
                         
                         # If we haven't found the count, wait for full page load
                         if follower_count is None:
@@ -239,10 +312,10 @@ def get_follower_counts(usernames, max_retries=3):
                             time.sleep(2)
                             
                     except Exception as e:
-                        print(f"Page load/redirect error: {str(e)}")
+                        logger.error(f"Page load/redirect error: {str(e)}")
                         retries += 1
                         if retries < max_retries:
-                            print(f"Retrying in 10 seconds... (attempt {retries + 1})")
+                            logger.info(f"Retrying in 10 seconds... (attempt {retries + 1})")
                             time.sleep(10)
                         continue
                     
@@ -256,18 +329,18 @@ def get_follower_counts(usernames, max_retries=3):
                     
                     retries += 1
                     if retries < max_retries:
-                        print(f"\nNo follower count found. Waiting 10 seconds before retry... (attempt {retries + 1})")
+                        logger.info(f"\nNo follower count found. Waiting 10 seconds before retry... (attempt {retries + 1})")
                         time.sleep(10)
                         
                 except Exception as e:
-                    print(f"Error in attempt {retries + 1}: {str(e)}")
+                    logger.error(f"Error in attempt {retries + 1}: {str(e)}")
                     retries += 1
                     if retries < max_retries:
-                        print(f"\nRetrying in 10 seconds... (attempt {retries + 1})")
+                        logger.info(f"\nRetrying in 10 seconds... (attempt {retries + 1})")
                         time.sleep(10)
             
             if follower_count is None:
-                print(f"\nFailed to get follower count for @{username} after {max_retries} attempts")
+                logger.error(f"\nFailed to get follower count for @{username} after {max_retries} attempts")
                 results.append({
                     'username': username,
                     'follower_count': None,
@@ -296,7 +369,7 @@ def get_airtable_records():
                 for record in records 
                 if record['fields'].get('twitter_user')]
     except Exception as e:
-        print(f"Error fetching from Airtable: {str(e)}")
+        logger.error(f"Error fetching from Airtable: {str(e)}")
         return []
 
 def update_airtable_batch(updates):
@@ -317,29 +390,32 @@ def update_airtable_batch(updates):
     try:
         response = requests.patch(url, headers=headers, json=data)
         response.raise_for_status()
-        print(f"Successfully updated batch of {len(updates)} records")
+        logger.info(f"Successfully updated batch of {len(updates)} records")
         return True
     except Exception as e:
-        print(f"Error updating batch in Airtable: {str(e)}")
+        logger.error(f"Error updating batch in Airtable: {str(e)}")
         return False
 
 if __name__ == "__main__":
-    print("Fetching Twitter usernames from Airtable...")
+    if not check_environment():
+        exit()
+    
+    logger.info("Fetching Twitter usernames from Airtable...")
     airtable_records = get_airtable_records()  # Get all records
     
     if not airtable_records:
-        print("No Twitter usernames found in Airtable.")
+        logger.info("No Twitter usernames found in Airtable.")
         exit()
     
-    print(f"Found {len(airtable_records)} Twitter accounts to process...")
+    logger.info(f"Found {len(airtable_records)} Twitter accounts to process...")
     usernames = [username for _, username in airtable_records]
-    print("Processing usernames:", ", ".join(f"@{username}" for username in usernames))
-    print("\nStarting the scraping process...")
+    logger.info("Processing usernames:", ", ".join(f"@{username}" for username in usernames))
+    logger.info("\nStarting the scraping process...")
     
     results = get_follower_counts(usernames)
     
     # Prepare updates in batches of 10
-    print("\nUpdating Airtable with follower counts...")
+    logger.info("\nUpdating Airtable with follower counts...")
     updates = []
     success_count = 0
     batch_size = 10
@@ -371,21 +447,21 @@ if __name__ == "__main__":
             failed_results.append(result)
     
     # Print results in a nice format
-    print("\nFinal Results:")
-    print("-" * 50)
+    logger.info("\nFinal Results:")
+    logger.info("-" * 50)
     
     if successful_results:
-        print("\nSuccessful Updates:")
+        logger.info("\nSuccessful Updates:")
         for result in successful_results:
             count = result['follower_count']
-            print(f"@{result['username']}: {count:,.0f} followers")
+            logger.info(f"@{result['username']}: {count:,.0f} followers")
     
     if failed_results:
-        print("\nFailed Updates:")
+        logger.info("\nFailed Updates:")
         for result in failed_results:
-            print(f"@{result['username']}: Not found")
+            logger.info(f"@{result['username']}: Not found")
     
-    print(f"\nTimestamp: {results[0]['timestamp']}")
-    print(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
+    logger.info(f"\nTimestamp: {results[0]['timestamp']}")
+    logger.info(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
     if failed_results:
-        print(f"Failed to get follower counts for {len(failed_results)} accounts")
+        logger.info(f"Failed to get follower counts for {len(failed_results)} accounts")
