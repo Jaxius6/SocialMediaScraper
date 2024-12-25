@@ -415,6 +415,6 @@ if __name__ == "__main__":
     
     if results:
         logger.info(f"\nTimestamp: {results[0]['timestamp']}")
-        logger.info(f"Successfully updated {success_count} out of {len(results)} records in Airtable")
+        logger.info(f"Successfully updated {success_count} out of {len(results)} Facebook records in Airtable")
     if failed_results:
-        logger.error(f"Failed to get follower counts for {len(failed_results)} accounts")
+        logger.error(f"Failed to get Facebook follower counts for {len(failed_results)} accounts")
