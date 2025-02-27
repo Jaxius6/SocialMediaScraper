@@ -146,13 +146,19 @@ def get_follower_counts(usernames, max_retries=2):
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    # Add these options to suppress WebGL warnings
-    options.add_argument('--disable-software-rasterizer')
-    options.add_argument('--disable-webgl')
-    options.add_argument('--disable-webgl2')
-    # Suppress logging
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    
+    # Add more random user agents
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
+    ]
+    options.add_argument(f'--user-agent={random.choice(user_agents)}')
+    
+    # Add these to make detection harder
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
     
     results = []
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -161,19 +167,12 @@ def get_follower_counts(usernames, max_retries=2):
     
     try:
         logger.info("Initializing Chrome driver...")
-        try:
-            service = Service()
-            driver = webdriver.Chrome(service=service, options=options)
-        except Exception as e:
-            logger.error(f"Error with default service, trying ChromeDriverManager: {str(e)}")
-            try:
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=options)
-            except Exception as e:
-                logger.error(f"Error with ChromeDriverManager: {str(e)}")
-                service = Service("chromedriver.exe")
-                driver = webdriver.Chrome(service=service, options=options)
-
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        # Modify the navigator.webdriver property
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         for index, username in enumerate(usernames, 1):
             if not username:
                 continue
@@ -185,65 +184,74 @@ def get_follower_counts(usernames, max_retries=2):
             while retries < max_retries and follower_count is None:
                 try:
                     logger.info(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
-                    url = f"https://www.facebook.com/{username}"
+                    
+                    # Try mobile version first
+                    url = f"https://m.facebook.com/{username}"
                     driver.get(url)
-                    wait_random()
+                    time.sleep(random.uniform(2, 3))
                     
-                    # Wait for and close the login popup if it appears
-                    try:
-                        wait = WebDriverWait(driver, 5)
-                        close_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'div[aria-label="Close"]')))
-                        close_button.click()
-                        logger.info("Closed login popup")
-                        wait_random()
-                    except:
-                        logger.info("No login popup found or couldn't close it")
-                    
-                    # Try to find follower count using multiple possible selectors
-                    wait = WebDriverWait(driver, 10)
-                    
-                    # List of possible selectors for follower count
+                    # Try different selectors for follower count
                     selectors = [
-                        "a[href*='followers'] span",
-                        "a[href*='followers']",
-                        "div[role='main'] span:contains('followers')",
-                        "div[role='main'] span:contains('people follow')"
+                        "//a[contains(@href, 'followers')]/span",
+                        "//a[contains(@href, 'followers')]",
+                        "//div[contains(text(), 'followers') or contains(text(), 'Followers')]",
+                        "//div[contains(text(), 'people follow')]",
+                        "//span[contains(text(), 'followers') or contains(text(), 'Followers')]"
                     ]
                     
+                    follower_text = None
                     for selector in selectors:
                         try:
-                            element = driver.find_element(By.CSS_SELECTOR, selector)
-                            follower_text = element.text
-                            logger.info(f"Found text: {follower_text}")
-                            follower_count = parse_follower_count(follower_text)
-                            if follower_count is not None:
+                            elements = driver.find_elements(By.XPATH, selector)
+                            for element in elements:
+                                text = element.text
+                                if text and ('follow' in text.lower() or 'people' in text.lower()):
+                                    follower_text = text
+                                    logger.info(f"Found text: {follower_text}")
+                                    break
+                            if follower_text:
                                 break
                         except:
                             continue
+                    
+                    if not follower_text:
+                        # Try desktop version if mobile fails
+                        url = f"https://www.facebook.com/{username}"
+                        driver.get(url)
+                        time.sleep(random.uniform(2, 3))
+                        
+                        for selector in selectors:
+                            try:
+                                elements = driver.find_elements(By.XPATH, selector)
+                                for element in elements:
+                                    text = element.text
+                                    if text and ('follow' in text.lower() or 'people' in text.lower()):
+                                        follower_text = text
+                                        logger.info(f"Found text: {follower_text}")
+                                        break
+                                if follower_text:
+                                    break
+                            except:
+                                continue
+                    
+                    if follower_text:
+                        follower_count = parse_follower_count(follower_text)
                     
                     if follower_count is None:
                         error_message = "Could not find or parse follower count"
                         retries += 1
                         if retries < max_retries:
                             logger.info(f"Retrying... ({retries}/{max_retries})")
-                            wait_random()
-                        
-                except TimeoutException as e:
-                    error_message = f"Timeout: {str(e)}"
-                    logger.error(f"Timeout while processing {username}")
-                    retries += 1
-                    if retries < max_retries:
-                        logger.info(f"Retrying... ({retries}/{max_retries})")
-                        wait_random()
+                            time.sleep(random.uniform(2, 3))
+                    
                 except Exception as e:
                     error_message = str(e)
                     logger.error(f"Error processing {username}: {str(e)}")
                     retries += 1
                     if retries < max_retries:
                         logger.info(f"Retrying... ({retries}/{max_retries})")
-                        wait_random()
+                        time.sleep(random.uniform(2, 3))
             
-            # Add result whether successful or not
             results.append({
                 'username': username,
                 'follower_count': follower_count,
@@ -256,7 +264,8 @@ def get_follower_counts(usernames, max_retries=2):
             else:
                 logger.error(f"Failed to process {username} after {max_retries} attempts: {error_message}")
             
-            wait_random()
+            # Add random delay between requests
+            time.sleep(random.uniform(3, 5))
             
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
@@ -327,13 +336,12 @@ def update_airtable_batch(updates):
     for i in range(0, len(updates), batch_size):
         batch = updates[i:i + batch_size]
         
-        # Prepare the payload
+        # Only update facebook_followers, remove fb_last since it's computed
         payload = {
             'records': [{
                 'id': update['id'],
                 'fields': {
-                    'facebook_followers': update['follower_count'],
-                    'facebook_last_updated': update['timestamp']
+                    'facebook_followers': update['follower_count']
                 }
             } for update in batch]
         }
@@ -359,7 +367,7 @@ if __name__ == "__main__":
         
     logger.info(f"Found {len(airtable_records)} Facebook usernames")
     
-    # Get follower counts
+    # Get follower counts for all users
     usernames = [record['facebook_user'] for record in airtable_records]
     results = get_follower_counts(usernames)
     
