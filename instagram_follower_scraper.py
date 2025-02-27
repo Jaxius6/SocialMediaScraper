@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 import time
 from functools import wraps
+import random
 
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
@@ -70,9 +71,62 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1):
         return wrapper
     return decorator
 
+def login_to_instagram(driver):
+    """Log into Instagram"""
+    try:
+        logger.info("Logging into Instagram...")
+        driver.get("https://www.instagram.com/accounts/login/")
+        time.sleep(random.uniform(3, 5))  # Wait for page load
+        
+        # Find and fill username
+        username_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.NAME, "username"))
+        )
+        username_input.send_keys(os.getenv('INSTAGRAM_USERNAME'))
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        # Find and fill password
+        password_input = driver.find_element(By.NAME, "password")
+        password_input.send_keys(os.getenv('INSTAGRAM_PASSWORD'))
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        # Click login button
+        login_button = driver.find_element(By.XPATH, "//button[@type='submit']")
+        login_button.click()
+        
+        # Wait for login to complete
+        time.sleep(random.uniform(4, 6))
+        
+        # Check for successful login
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']"))
+            )
+            # If we find a dialog, click "Not Now" if it exists
+            try:
+                not_now_button = driver.find_element(By.XPATH, "//button[contains(text(), 'Not Now')]")
+                not_now_button.click()
+            except Exception:
+                pass
+        except TimeoutException:
+            pass
+        
+        logger.info("Successfully logged into Instagram")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to log in to Instagram: {str(e)}")
+        return False
+
 def check_environment():
     """Check if all required environment variables are set"""
-    required_vars = ['AIRTABLE_PAT', 'AIRTABLE_BASE_ID', 'AIRTABLE_TABLE_NAME']
+    required_vars = [
+        'AIRTABLE_PAT', 
+        'AIRTABLE_BASE_ID', 
+        'AIRTABLE_TABLE_NAME',
+        'INSTAGRAM_USERNAME',
+        'INSTAGRAM_PASSWORD'
+    ]
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -111,7 +165,6 @@ from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 import time
-import random
 import requests
 import json
 import re
@@ -160,13 +213,18 @@ def get_follower_counts(usernames, max_retries=2):
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    # Add these options to suppress WebGL warnings
-    options.add_argument('--disable-software-rasterizer')
-    options.add_argument('--disable-webgl')
-    options.add_argument('--disable-webgl2')
-    # Suppress logging
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    # Add more random user agents
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+    ]
+    options.add_argument(f'--user-agent={random.choice(user_agents)}')
+    
+    # Add these to make detection harder
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
     
     results = []
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -188,6 +246,10 @@ def get_follower_counts(usernames, max_retries=2):
                 service = Service("chromedriver.exe")
                 driver = webdriver.Chrome(service=service, options=options)
 
+        # Add login step here
+        if not login_to_instagram(driver):
+            raise Exception("Failed to log in to Instagram")
+        
         for index, username in enumerate(usernames, 1):  
             if not username:
                 continue
@@ -196,62 +258,84 @@ def get_follower_counts(usernames, max_retries=2):
             follower_count = None
             error_message = None
             
-            while retries < max_retries and follower_count is None:
+            while retries < max_retries:
                 try:
                     logger.info(f"\n{index}/{total_users} @{username} (Attempt {retries + 1}/{max_retries})")
                     url = f"https://www.instagram.com/{username}/"
                     driver.get(url)
                     
+                    # Add check for "Page Not Found"
+                    try:
+                        error_text = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Sorry, this page isn')]"))
+                        )
+                        logger.error(f"Page not found for {username}")
+                        error_message = "Page not found"
+                        break  # Exit retry loop if page doesn't exist
+                    except TimeoutException:
+                        pass  # Page exists, continue normally
+                    
                     def get_follower_count(driver, username):
                         try:
-                            # Wait for initial page load
-                            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                            # Wait for initial page load with randomization
+                            wait_time = random.uniform(3, 5)
+                            WebDriverWait(driver, wait_time).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
                             
-                            # Try to find the follower count using multiple methods
+                            # Add random scrolling to simulate human behavior
+                            driver.execute_script(f"window.scrollTo(0, {random.randint(100, 300)});")
+                            time.sleep(random.uniform(0.5, 1.5))
+                            driver.execute_script("window.scrollTo(0, 0);")
+                            
+                            # Updated selectors for follower count
                             methods = [
-                                # Method 1: Try to find the meta tag first (most reliable)
-                                lambda: driver.find_element(By.CSS_SELECTOR, 'meta[property="og:description"]').get_attribute("content").split(" ")[0],
+                                # Method 1: New meta tag format
+                                lambda: driver.find_element(By.CSS_SELECTOR, 'meta[property="og:description"]')
+                                    .get_attribute("content").split("Followers")[0].strip().split()[-1],
                                 
-                                # Method 2: Try the section containing stats
-                                lambda: driver.find_element(By.XPATH, "//a[contains(@href, '/followers')]/span/span").text,
+                                # Method 2: Updated class names for stats section
+                                lambda: driver.find_element(By.CSS_SELECTOR, 'span[class*="_aacl"][class*="_aaco"]').text,
                                 
-                                # Method 3: Try various CSS selectors
-                                lambda: next(
-                                    element.text for element in driver.find_elements(By.CSS_SELECTOR, 
-                                    "span[class*='_ac2a'], span[class*='_aacl'], span[class*='x1lliihq'], span[class*='x156sbe']")
-                                    if element.text and any(c.isdigit() for c in element.text)
-                                ),
+                                # Method 3: New XPath for follower count
+                                lambda: driver.find_element(
+                                    By.XPATH,
+                                    "//section//ul//li[2]//span//span[contains(@class, '_ac2a') or contains(@class, '_aacl')]"
+                                ).text,
                                 
-                                # Method 4: Try finding any span near the followers link
-                                lambda: driver.find_element(By.XPATH, "//a[contains(@href, '/followers')]//span[contains(@class, '_')]").text
+                                # Method 4: Backup method using aria-label
+                                lambda: driver.find_element(
+                                    By.CSS_SELECTOR,
+                                    'a[href*="/followers/"] span[aria-label]'
+                                ).get_attribute('aria-label').split()[0]
                             ]
                             
-                            # Try each method
+                            # Try each method with proper error handling
                             for method in methods:
                                 try:
                                     count_text = method()
                                     if count_text:
-                                        # Clean up the text and extract numbers
-                                        count = ''.join(filter(str.isdigit, count_text))
-                                        if count:
-                                            return int(count)
+                                        parsed_count = parse_follower_count(count_text)
+                                        if parsed_count:
+                                            return parsed_count
                                 except Exception:
                                     continue
                             
-                            # If we get here, try one last time with a longer wait
-                            time.sleep(5)  # Wait a bit longer
-                            elements = driver.find_elements(By.XPATH, "//*[contains(text(),'followers') or contains(text(),'Followers')]")
+                            # If no method worked, try one last time after a longer wait
+                            time.sleep(random.uniform(2, 3))
+                            elements = driver.find_elements(
+                                By.XPATH,
+                                "//*[contains(text(),'followers') or contains(text(),'Followers')]"
+                            )
                             for elem in elements:
                                 text = elem.text
                                 if text and any(c.isdigit() for c in text):
-                                    count = ''.join(filter(str.isdigit, text))
-                                    if count:
-                                        return int(count)
+                                    parsed_count = parse_follower_count(text)
+                                    if parsed_count:
+                                        return parsed_count
                             
                             raise ValueError("Could not find follower count")
                             
                         except Exception as e:
-                            logger.error(f"Error getting follower count: {str(e)}")
+                            logger.error(f"Error getting follower count for {username}: {str(e)}")
                             return None
                     
                     follower_count = get_follower_count(driver, username)
@@ -260,27 +344,18 @@ def get_follower_counts(usernames, max_retries=2):
                         logger.info(f"Successfully found follower count: {follower_count}")
                         break
                         
-                    # If we haven't found the count yet, wait and try again
-                    time.sleep(2)
-                    
-                    # Add a longer wait for Instagram to load dynamic content
-                    time.sleep(3)
-                    wait_random()
-                    
-                except TimeoutException as e:
-                    error_message = f"Timeout: {str(e)}"
-                    logger.error(f"Timeout while processing {username}")
                     retries += 1
                     if retries < max_retries:
                         logger.info(f"Retrying... ({retries}/{max_retries})")
-                        wait_random()
+                        time.sleep(random.uniform(2, 3))
+                
                 except Exception as e:
                     error_message = str(e)
                     logger.error(f"Error processing {username}: {str(e)}")
                     retries += 1
                     if retries < max_retries:
                         logger.info(f"Retrying... ({retries}/{max_retries})")
-                        wait_random()
+                        time.sleep(random.uniform(2, 3))
             
             # Add result whether successful or not
             results.append({
@@ -295,7 +370,8 @@ def get_follower_counts(usernames, max_retries=2):
             else:
                 logger.error(f"Failed to process {username} after {max_retries} attempts: {error_message}")
             
-            wait_random()
+            # Add longer delay between accounts to avoid rate limiting
+            time.sleep(random.uniform(2, 4))
             
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
